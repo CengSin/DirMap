@@ -42,6 +42,13 @@ make docker-logs
 make docker-down
 ```
 
+> **macOS 用户注意**：Docker Desktop 在 macOS 上无法可靠地传递文件系统事件（inotify）。请在 `config-docker.yaml` 中启用轮询模式：
+> ```yaml
+> polling:
+>   enabled: true
+>   interval: 10s
+> ```
+
 ## 配置说明
 
 复制 `config.yaml.example` 为 `config.yaml` 并编辑：

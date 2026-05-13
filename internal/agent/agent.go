@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,37 +17,48 @@ import (
 
 type Agent struct {
 	cfg        *config.Config
-	watcher    *watcher.Watcher
+	closer     io.Closer
 	debouncer  *watcher.Debouncer
 	summarizer *summarizer.Summarizer
 	writer     *writer.Writer
-	cache      map[string]map[string]model.FileInfo // watchPath -> filePath -> FileInfo
+	cache      map[string]map[string]model.FileInfo
 }
 
 func New(cfg *config.Config) (*Agent, error) {
-	w, err := watcher.New(cfg)
-	if err != nil {
-		return nil, err
+	var eventCh <-chan string
+	var closer io.Closer
+
+	if cfg.Polling.Enabled {
+		p := watcher.NewPollingWatcher(cfg)
+		go p.Run()
+		eventCh = p.Events
+		closer = p
+		log.Println("agent: using polling mode")
+	} else {
+		w, err := watcher.New(cfg)
+		if err != nil {
+			return nil, err
+		}
+		eventCh = w.Events
+		closer = w
+		log.Println("agent: using fsnotify mode")
 	}
 
-	deb := watcher.NewDebouncer(cfg.Debounce.Interval, cfg.Debounce.MaxWait, w.Events)
+	deb := watcher.NewDebouncer(cfg.Debounce.Interval, cfg.Debounce.MaxWait, eventCh)
 
-	a := &Agent{
+	return &Agent{
 		cfg:        cfg,
-		watcher:    w,
+		closer:     closer,
 		debouncer:  deb,
 		summarizer: summarizer.New(cfg),
 		writer:     writer.New(cfg),
 		cache:      make(map[string]map[string]model.FileInfo),
-	}
-
-	return a, nil
+	}, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
 	log.Println("agent: starting...")
 
-	// Initial scan
 	if a.cfg.InitialScan {
 		log.Println("agent: running initial scan...")
 		if err := a.initialScan(ctx); err != nil {
@@ -61,7 +73,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			log.Println("agent: shutting down...")
 			a.debouncer.Stop()
-			return a.watcher.Close()
+			return a.closer.Close()
 
 		case paths, ok := <-a.debouncer.OutCh:
 			if !ok {

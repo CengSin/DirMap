@@ -42,6 +42,13 @@ make docker-logs
 make docker-down
 ```
 
+> **Note for macOS users**: Docker on macOS doesn't reliably propagate file system events (inotify). Enable polling mode in `config-docker.yaml`:
+> ```yaml
+> polling:
+>   enabled: true
+>   interval: 10s
+> ```
+
 ## Configuration
 
 Copy `config.yaml.example` to `config.yaml` and edit:
