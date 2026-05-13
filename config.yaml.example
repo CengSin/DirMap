@@ -1,0 +1,35 @@
+# Directories to watch (absolute or relative paths)
+watch_paths:
+  - /Users/me/projects/myproject
+  - /Users/me/documents/notes
+
+# Where to write description files
+output_dir: /Users/me/descriptions
+
+# Claude API settings
+llm:
+  base_url: ""                  # custom API base URL (leave empty for default)
+  api_key: ""                   # leave empty to use ANTHROPIC_API_KEY env var
+  model: "claude-haiku-4-5"     # claude-haiku-4-5, claude-sonnet-4-5, etc.
+  max_tokens: 4096
+  temperature: 0.3
+  max_batch_size: 50            # max files per LLM call
+  max_file_content_bytes: 2048  # read first N bytes of each file for context
+
+# Debounce settings
+debounce:
+  interval: 3s                  # wait this long after last event before processing
+  max_wait: 30s                 # even if events keep coming, flush after this long
+
+# Behavior
+initial_scan: true              # scan existing files on startup
+follow_symlinks: false
+ignore_patterns:
+  - ".git"
+  - "node_modules"
+  - ".DS_Store"
+  - "*.tmp"
+  - "*.swp"
+
+# Logging: debug, info, warn, error
+log_level: "info"
