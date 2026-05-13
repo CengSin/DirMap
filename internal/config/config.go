@@ -13,10 +13,16 @@ type Config struct {
 	OutputDir      string         `yaml:"output_dir"`
 	LLM            LLMConfig      `yaml:"llm"`
 	Debounce       DebounceConfig `yaml:"debounce"`
+	Polling        PollingConfig  `yaml:"polling"`
 	InitialScan    bool           `yaml:"initial_scan"`
 	FollowSymlinks bool           `yaml:"follow_symlinks"`
 	IgnorePatterns []string       `yaml:"ignore_patterns"`
 	LogLevel       string         `yaml:"log_level"`
+}
+
+type PollingConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"`
 }
 
 type LLMConfig struct {
@@ -75,6 +81,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Debounce.MaxWait == 0 {
 		cfg.Debounce.MaxWait = 30 * time.Second
+	}
+	if cfg.Polling.Enabled && cfg.Polling.Interval == 0 {
+		cfg.Polling.Interval = 10 * time.Second
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
