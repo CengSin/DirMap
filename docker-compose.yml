@@ -9,6 +9,9 @@ services:
       - /Users/cengsin/GoWork2026:/GoWork2026:ro
       - /Users/cengsin/GolandWorkSapce2025:/GolandWorkSapce2025:ro
       - /Users/cengsin/GolandWS:/GolandWS:ro
+      - /Users/cengsin/my_projects:/my_projects:ro
+      - /Users/cengsin/AI:/AI:ro
+      - /Users/cengsin/agent-projects:/agent-projects:ro
       # Mount the output directory (read-write)
       - /Users/cengsin/work_description:/output
       # Mount config file

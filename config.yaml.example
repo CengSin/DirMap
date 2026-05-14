@@ -14,6 +14,7 @@ llm:
   max_tokens: 4096
   temperature: 0.3
   max_batch_size: 50            # max files per LLM call
+  max_concurrency: 3            # max parallel LLM API calls
   max_file_content_bytes: 2048  # read first N bytes of each file for context
 
 # Debounce settings

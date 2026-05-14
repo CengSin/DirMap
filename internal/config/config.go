@@ -32,6 +32,7 @@ type LLMConfig struct {
 	MaxTokens           int     `yaml:"max_tokens"`
 	Temperature         float64 `yaml:"temperature"`
 	MaxBatchSize        int     `yaml:"max_batch_size"`
+	MaxConcurrency      int     `yaml:"max_concurrency"`
 	MaxFileContentBytes int     `yaml:"max_file_content_bytes"`
 }
 
@@ -72,6 +73,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.LLM.MaxBatchSize == 0 {
 		cfg.LLM.MaxBatchSize = 50
+	}
+	if cfg.LLM.MaxConcurrency == 0 {
+		cfg.LLM.MaxConcurrency = 3
 	}
 	if cfg.LLM.MaxFileContentBytes == 0 {
 		cfg.LLM.MaxFileContentBytes = 2048
