@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -41,25 +42,72 @@ func (s *Summarizer) SummarizeBatch(ctx context.Context, files []model.FileInfo)
 	}
 
 	batchSize := s.cfg.LLM.MaxBatchSize
-	var allResults []model.FileInfo
+	concurrency := s.cfg.LLM.MaxConcurrency
 
+	// Split into batches
+	var batches [][]model.FileInfo
 	for i := 0; i < len(files); i += batchSize {
 		end := i + batchSize
 		if end > len(files) {
 			end = len(files)
 		}
-		batch := files[i:end]
-
-		results, err := s.callWithRetry(ctx, batch, 3)
-		if err != nil {
-			log.Printf("summarizer: batch failed: %v", err)
-			allResults = append(allResults, batch...)
-			continue
-		}
-		allResults = append(allResults, results...)
+		batches = append(batches, files[i:end])
 	}
 
-	return allResults, nil
+	// Single batch — no need for goroutine overhead
+	if len(batches) == 1 {
+		results, err := s.callWithRetry(ctx, batches[0], 3)
+		if err != nil {
+			log.Printf("summarizer: batch failed: %v", err)
+			return batches[0], err
+		}
+		return results, nil
+	}
+
+	// Concurrent worker pool
+	results := make([][]model.FileInfo, len(batches))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i, batch := range batches {
+		wg.Add(1)
+		go func(idx int, b []model.FileInfo) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				mu.Lock()
+				results[idx] = b
+				mu.Unlock()
+				return
+			}
+
+			res, err := s.callWithRetry(ctx, b, 3)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				log.Printf("summarizer: batch %d failed: %v", idx, err)
+				results[idx] = b // fallback without descriptions
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				results[idx] = res
+			}
+		}(i, batch)
+	}
+
+	wg.Wait()
+
+	// Flatten in order
+	var allResults []model.FileInfo
+	for _, r := range results {
+		allResults = append(allResults, r...)
+	}
+	return allResults, firstErr
 }
 
 func (s *Summarizer) callWithRetry(ctx context.Context, files []model.FileInfo, maxRetries int) ([]model.FileInfo, error) {

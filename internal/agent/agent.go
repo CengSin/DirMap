@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/cengsin/system-agent-rag/internal/cache"
 	"github.com/cengsin/system-agent-rag/internal/config"
@@ -24,6 +25,7 @@ type Agent struct {
 	writer     *writer.Writer
 	cacheStore *cache.Store
 	cache      map[string]map[string]model.FileInfo
+	mu         sync.Mutex
 }
 
 func New(cfg *config.Config) (*Agent, error) {
@@ -93,49 +95,59 @@ func (a *Agent) initialScan(ctx context.Context) error {
 		return err
 	}
 
+	var wg sync.WaitGroup
+
 	for watchPath, scanned := range results {
-		// Load persisted cache
-		saved, err := a.cacheStore.Load(watchPath)
-		if err != nil {
-			log.Printf("agent: cache load error for %s: %v", watchPath, err)
-		}
+		wg.Add(1)
+		go func(wp string, sc []model.FileInfo) {
+			defer wg.Done()
 
-		// Diff: only call LLM for new/changed directories
-		newDirs, cachedDirs := cache.Diff(scanned, saved)
-		log.Printf("agent: %s — %d new, %d cached", watchPath, len(newDirs), len(cachedDirs))
-
-		var allDirs []model.FileInfo
-		allDirs = append(allDirs, cachedDirs...)
-
-		if len(newDirs) > 0 {
-			summarized, err := a.summarizer.SummarizeBatch(ctx, newDirs)
+			// Load persisted cache
+			saved, err := a.cacheStore.Load(wp)
 			if err != nil {
-				log.Printf("agent: summarize error for %s: %v", watchPath, err)
-				summarized = newDirs
+				log.Printf("agent: cache load error for %s: %v", wp, err)
 			}
-			allDirs = append(allDirs, summarized...)
-		}
 
-		// Update in-memory cache
-		dirCache := make(map[string]model.FileInfo, len(allDirs))
-		for _, f := range allDirs {
-			dirCache[f.Path] = f
-		}
-		a.cache[watchPath] = dirCache
+			// Diff: only call LLM for new/changed directories
+			newDirs, cachedDirs := cache.Diff(sc, saved)
+			log.Printf("agent: %s — %d new, %d cached", wp, len(newDirs), len(cachedDirs))
 
-		// Persist cache
-		if err := a.cacheStore.Save(watchPath, allDirs); err != nil {
-			log.Printf("agent: cache save error for %s: %v", watchPath, err)
-		}
+			var allDirs []model.FileInfo
+			allDirs = append(allDirs, cachedDirs...)
 
-		// Write descriptions
-		if err := a.writer.WriteDescriptions(watchPath, allDirs); err != nil {
-			log.Printf("agent: write error for %s: %v", watchPath, err)
-		} else {
-			log.Printf("agent: wrote descriptions for %s (%d items)", watchPath, len(allDirs))
-		}
+			if len(newDirs) > 0 {
+				summarized, err := a.summarizer.SummarizeBatch(ctx, newDirs)
+				if err != nil {
+					log.Printf("agent: summarize error for %s: %v", wp, err)
+					summarized = newDirs
+				}
+				allDirs = append(allDirs, summarized...)
+			}
+
+			// Update in-memory cache
+			dirCache := make(map[string]model.FileInfo, len(allDirs))
+			for _, f := range allDirs {
+				dirCache[f.Path] = f
+			}
+			a.mu.Lock()
+			a.cache[wp] = dirCache
+			a.mu.Unlock()
+
+			// Persist cache
+			if err := a.cacheStore.Save(wp, allDirs); err != nil {
+				log.Printf("agent: cache save error for %s: %v", wp, err)
+			}
+
+			// Write descriptions
+			if err := a.writer.WriteDescriptions(wp, allDirs); err != nil {
+				log.Printf("agent: write error for %s: %v", wp, err)
+			} else {
+				log.Printf("agent: wrote descriptions for %s (%d items)", wp, len(allDirs))
+			}
+		}(watchPath, scanned)
 	}
 
+	wg.Wait()
 	return nil
 }
 
@@ -153,7 +165,9 @@ func (a *Agent) handleChanges(ctx context.Context, paths []string) {
 		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
+				a.mu.Lock()
 				delete(a.cache[watchPath], path)
+				a.mu.Unlock()
 				grouped[watchPath] = nil
 			}
 			continue
@@ -175,39 +189,52 @@ func (a *Agent) handleChanges(ctx context.Context, paths []string) {
 		grouped[watchPath] = append(grouped[watchPath], fi)
 	}
 
+	var wg sync.WaitGroup
+
 	for watchPath, changedDirs := range grouped {
-		// Summarize new/changed directories
-		if len(changedDirs) > 0 {
-			summarized, err := a.summarizer.SummarizeBatch(ctx, changedDirs)
-			if err != nil {
-				log.Printf("agent: summarize error for %s: %v", watchPath, err)
-				summarized = changedDirs
+		wg.Add(1)
+		go func(wp string, dirs []model.FileInfo) {
+			defer wg.Done()
+
+			// Summarize new/changed directories
+			if len(dirs) > 0 {
+				summarized, err := a.summarizer.SummarizeBatch(ctx, dirs)
+				if err != nil {
+					log.Printf("agent: summarize error for %s: %v", wp, err)
+					summarized = dirs
+				}
+
+				a.mu.Lock()
+				if a.cache[wp] == nil {
+					a.cache[wp] = make(map[string]model.FileInfo)
+				}
+				for _, f := range summarized {
+					a.cache[wp][f.Path] = f
+				}
+				a.mu.Unlock()
 			}
 
-			if a.cache[watchPath] == nil {
-				a.cache[watchPath] = make(map[string]model.FileInfo)
+			// Build snapshot of all dirs under lock
+			a.mu.Lock()
+			allDirs := make([]model.FileInfo, 0, len(a.cache[wp]))
+			for _, f := range a.cache[wp] {
+				allDirs = append(allDirs, f)
 			}
-			for _, f := range summarized {
-				a.cache[watchPath][f.Path] = f
+			a.mu.Unlock()
+
+			if err := a.cacheStore.Save(wp, allDirs); err != nil {
+				log.Printf("agent: cache save error for %s: %v", wp, err)
 			}
-		}
 
-		// Always rewrite: deletions also require updating the file
-		allDirs := make([]model.FileInfo, 0, len(a.cache[watchPath]))
-		for _, f := range a.cache[watchPath] {
-			allDirs = append(allDirs, f)
-		}
-
-		if err := a.cacheStore.Save(watchPath, allDirs); err != nil {
-			log.Printf("agent: cache save error for %s: %v", watchPath, err)
-		}
-
-		if err := a.writer.WriteDescriptions(watchPath, allDirs); err != nil {
-			log.Printf("agent: write error for %s: %v", watchPath, err)
-		} else {
-			log.Printf("agent: updated descriptions for %s", watchPath)
-		}
+			if err := a.writer.WriteDescriptions(wp, allDirs); err != nil {
+				log.Printf("agent: write error for %s: %v", wp, err)
+			} else {
+				log.Printf("agent: updated descriptions for %s", wp)
+			}
+		}(watchPath, changedDirs)
 	}
+
+	wg.Wait()
 }
 
 func (a *Agent) findWatchPath(path string) string {
