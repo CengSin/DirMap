@@ -19,13 +19,13 @@ llm:
 
 # Debounce settings
 debounce:
-  interval: 3s                  # wait this long after last event before processing
-  max_wait: 30s                 # even if events keep coming, flush after this long
+  interval: 24h                 # wait this long after last event before processing
+  max_wait: 24h                 # even if events keep coming, flush after this long
 
 # Polling mode (for Docker on macOS where fsnotify/inotify doesn't work reliably)
 polling:
   enabled: false                # set to true when running in Docker on macOS
-  interval: 10s                 # how often to scan for directory changes
+  interval: 24h                 # how often to scan for directory changes
 
 # Behavior
 initial_scan: true              # scan existing files on startup

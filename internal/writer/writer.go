@@ -1,9 +1,11 @@
 package writer
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,13 +21,24 @@ func New(cfg *config.Config) *Writer {
 	return &Writer{outputDir: cfg.OutputDir}
 }
 
-func (w *Writer) WriteDescriptions(watchPath string, dirs []model.FileInfo) error {
+// WriteDescriptions writes only when the rendered table changes. It returns
+// whether a write was performed.
+func (w *Writer) WriteDescriptions(watchPath string, dirs []model.FileInfo) (bool, error) {
 	filename := sanitizePath(watchPath) + ".md"
 	outPath := filepath.Join(w.outputDir, filename)
+	slices.SortFunc(dirs, func(a, b model.FileInfo) int { return strings.Compare(a.Path, b.Path) })
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Directory Descriptions: %s\n", watchPath)
-	fmt.Fprintf(&b, "Generated: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	// Use the latest source modification time rather than wall-clock time so
+	// an unchanged snapshot produces identical output and needs no rewrite.
+	latest := time.Time{}
+	for _, d := range dirs {
+		if d.ModTime.After(latest) {
+			latest = d.ModTime
+		}
+	}
+	fmt.Fprintf(&b, "Generated: %s\n\n", latest.Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(&b, "| Path | Modified | Description |\n")
 	fmt.Fprintf(&b, "|------|----------|-------------|\n")
 
@@ -50,15 +63,22 @@ func (w *Writer) WriteDescriptions(watchPath string, dirs []model.FileInfo) erro
 	}
 
 	tmpPath := outPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(b.String()), 0o644); err != nil {
-		return fmt.Errorf("write tmp: %w", err)
+	data := []byte(b.String())
+	if existing, err := os.ReadFile(outPath); err == nil && bytes.Equal(existing, data) {
+		return false, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read existing: %w", err)
+	}
+
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return false, fmt.Errorf("write tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, outPath); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("rename: %w", err)
+		return false, fmt.Errorf("rename: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func sanitizePath(path string) string {
@@ -69,4 +89,3 @@ func sanitizePath(path string) string {
 	s = strings.Trim(s, "-.")
 	return s
 }
-

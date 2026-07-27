@@ -16,6 +16,7 @@ type Debouncer struct {
 	firstAt  time.Time
 	done     chan struct{}
 	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewDebouncer(interval, maxWait time.Duration, inCh <-chan string) *Debouncer {
@@ -33,14 +34,31 @@ func NewDebouncer(interval, maxWait time.Duration, inCh <-chan string) *Debounce
 }
 
 func (d *Debouncer) Stop() {
-	close(d.stop)
+	d.stopOnce.Do(func() { close(d.stop) })
 	<-d.done
 }
 
 func (d *Debouncer) run() {
 	defer close(d.done)
 
-	for path := range d.inCh {
+	for {
+		var path string
+		var ok bool
+		select {
+		case <-d.stop:
+			d.mu.Lock()
+			d.flushLocked()
+			d.mu.Unlock()
+			return
+		case path, ok = <-d.inCh:
+			if !ok {
+				d.mu.Lock()
+				d.flushLocked()
+				d.mu.Unlock()
+				return
+			}
+		}
+
 		d.mu.Lock()
 		if len(d.pending) == 0 {
 			d.firstAt = time.Now()
@@ -58,13 +76,6 @@ func (d *Debouncer) run() {
 		}
 		d.mu.Unlock()
 	}
-
-	// Channel closed, flush remaining
-	d.mu.Lock()
-	if len(d.pending) > 0 {
-		d.flushLocked()
-	}
-	d.mu.Unlock()
 }
 
 func (d *Debouncer) flush() {

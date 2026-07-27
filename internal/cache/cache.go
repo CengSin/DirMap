@@ -1,9 +1,12 @@
 package cache
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/cengsin/system-agent-rag/internal/model"
@@ -46,7 +49,9 @@ func (s *Store) Load(watchPath string) (map[string]Entry, error) {
 	return m, nil
 }
 
-func (s *Store) Save(watchPath string, files []model.FileInfo) error {
+// SaveIfChanged persists a stable snapshot only when it differs from the
+// existing file. It returns whether a write was performed.
+func (s *Store) SaveIfChanged(watchPath string, files []model.FileInfo) (bool, error) {
 	entries := make([]Entry, 0, len(files))
 	for _, f := range files {
 		entries = append(entries, Entry{
@@ -56,21 +61,30 @@ func (s *Store) Save(watchPath string, files []model.FileInfo) error {
 			Description: f.Description,
 		})
 	}
+	slices.SortFunc(entries, func(a, b Entry) int { return strings.Compare(a.Path, b.Path) })
 
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	p := s.filePath(watchPath)
+	if existing, err := os.ReadFile(p); err == nil && bytes.Equal(existing, data) {
+		return false, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
+		return false, err
 	}
-	return os.Rename(tmp, p)
+	if err := os.Rename(tmp, p); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) filePath(watchPath string) string {

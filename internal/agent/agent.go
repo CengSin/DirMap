@@ -77,8 +77,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			log.Println("agent: shutting down...")
+			if err := a.closer.Close(); err != nil {
+				return err
+			}
 			a.debouncer.Stop()
-			return a.closer.Close()
+			return nil
 
 		case paths, ok := <-a.debouncer.OutCh:
 			if !ok {
@@ -134,14 +137,15 @@ func (a *Agent) initialScan(ctx context.Context) error {
 			a.mu.Unlock()
 
 			// Persist cache
-			if err := a.cacheStore.Save(wp, allDirs); err != nil {
+			if _, err := a.cacheStore.SaveIfChanged(wp, allDirs); err != nil {
 				log.Printf("agent: cache save error for %s: %v", wp, err)
 			}
 
 			// Write descriptions
-			if err := a.writer.WriteDescriptions(wp, allDirs); err != nil {
+			written, err := a.writer.WriteDescriptions(wp, allDirs)
+			if err != nil {
 				log.Printf("agent: write error for %s: %v", wp, err)
-			} else {
+			} else if written {
 				log.Printf("agent: wrote descriptions for %s (%d items)", wp, len(allDirs))
 			}
 		}(watchPath, scanned)
@@ -166,7 +170,11 @@ func (a *Agent) handleChanges(ctx context.Context, paths []string) {
 		if err != nil {
 			if os.IsNotExist(err) {
 				a.mu.Lock()
-				delete(a.cache[watchPath], path)
+				for cachedPath := range a.cache[watchPath] {
+					if cachedPath == path || (len(cachedPath) > len(path) && cachedPath[:len(path)] == path && cachedPath[len(path)] == filepath.Separator) {
+						delete(a.cache[watchPath], cachedPath)
+					}
+				}
 				a.mu.Unlock()
 				grouped[watchPath] = nil
 			}
@@ -222,13 +230,14 @@ func (a *Agent) handleChanges(ctx context.Context, paths []string) {
 			}
 			a.mu.Unlock()
 
-			if err := a.cacheStore.Save(wp, allDirs); err != nil {
+			if _, err := a.cacheStore.SaveIfChanged(wp, allDirs); err != nil {
 				log.Printf("agent: cache save error for %s: %v", wp, err)
 			}
 
-			if err := a.writer.WriteDescriptions(wp, allDirs); err != nil {
+			written, err := a.writer.WriteDescriptions(wp, allDirs)
+			if err != nil {
 				log.Printf("agent: write error for %s: %v", wp, err)
-			} else {
+			} else if written {
 				log.Printf("agent: updated descriptions for %s", wp)
 			}
 		}(watchPath, changedDirs)
@@ -245,4 +254,3 @@ func (a *Agent) findWatchPath(path string) string {
 	}
 	return ""
 }
-

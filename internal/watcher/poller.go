@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cengsin/system-agent-rag/internal/config"
@@ -13,25 +14,35 @@ import (
 // PollingWatcher detects directory changes by periodically walking the filesystem.
 // Use this when fsnotify doesn't work reliably (e.g., Docker on macOS).
 type PollingWatcher struct {
-	Events   chan string
-	cfg      *config.Config
-	interval time.Duration
-	stop     chan struct{}
+	Events    chan string
+	cfg       *config.Config
+	interval  time.Duration
+	stop      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+	snapshots map[string]map[string]bool
 }
 
 func NewPollingWatcher(cfg *config.Config) *PollingWatcher {
 	return &PollingWatcher{
-		Events:   make(chan string, 100),
-		cfg:      cfg,
-		interval: cfg.Polling.Interval,
-		stop:     make(chan struct{}),
+		Events:    make(chan string, 100),
+		cfg:       cfg,
+		interval:  cfg.Polling.Interval,
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		snapshots: make(map[string]map[string]bool, len(cfg.WatchPaths)),
 	}
 }
 
 func (p *PollingWatcher) Run() {
+	defer close(p.done)
+	defer close(p.Events)
 	log.Printf("poller: started with interval %v", p.interval)
 
-	snapshot := p.takeSnapshot()
+	// Initial snapshot per watch path.
+	for _, watchPath := range p.cfg.WatchPaths {
+		p.snapshots[watchPath] = p.walkWatchPath(watchPath)
+	}
 
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -41,55 +52,60 @@ func (p *PollingWatcher) Run() {
 		case <-p.stop:
 			return
 		case <-ticker.C:
-			current := p.takeSnapshot()
-			p.diffAndSend(snapshot, current)
-			snapshot = current
+			p.poll()
 		}
 	}
 }
 
 func (p *PollingWatcher) Close() error {
-	close(p.stop)
-	close(p.Events)
+	p.closeOnce.Do(func() {
+		close(p.stop)
+		<-p.done
+	})
 	return nil
 }
 
-func (p *PollingWatcher) takeSnapshot() map[string]bool {
-	dirs := make(map[string]bool)
+// poll compares directory snapshots. Checking only the root directory's mtime
+// misses changes under nested directories on common filesystems.
+func (p *PollingWatcher) poll() {
 	for _, watchPath := range p.cfg.WatchPaths {
-		filepath.WalkDir(watchPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
+		old := p.snapshots[watchPath]
+		current := p.walkWatchPath(watchPath)
+		p.snapshots[watchPath] = current
+
+		// Diff and send events for this watch path only.
+		for path := range current {
+			if !old[path] {
+				p.sendEvent(path)
 			}
-			name := d.Name()
-			if shouldIgnorePoll(path, name, p.cfg.IgnorePatterns) {
-				if d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
+		}
+		for path := range old {
+			if !current[path] {
+				p.sendEvent(path)
 			}
-			if d.IsDir() {
-				dirs[path] = true
-			}
-			return nil
-		})
+		}
 	}
-	return dirs
 }
 
-func (p *PollingWatcher) diffAndSend(old, current map[string]bool) {
-	// New directories
-	for path := range current {
-		if !old[path] {
-			p.sendEvent(path)
+func (p *PollingWatcher) walkWatchPath(watchPath string) map[string]bool {
+	dirs := make(map[string]bool)
+	filepath.WalkDir(watchPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-	}
-	// Deleted directories
-	for path := range old {
-		if !current[path] {
-			p.sendEvent(path)
+		name := d.Name()
+		if shouldIgnorePoll(path, name, p.cfg.IgnorePatterns) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-	}
+		if d.IsDir() {
+			dirs[path] = true
+		}
+		return nil
+	})
+	return dirs
 }
 
 func (p *PollingWatcher) sendEvent(path string) {

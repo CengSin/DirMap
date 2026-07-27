@@ -4,15 +4,18 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/cengsin/system-agent-rag/internal/config"
 	"github.com/fsnotify/fsnotify"
 )
 
 type Watcher struct {
-	fs       *fsnotify.Watcher
-	Events   chan string
-	cfg      *config.Config
+	fs        *fsnotify.Watcher
+	Events    chan string
+	cfg       *config.Config
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func New(cfg *config.Config) (*Watcher, error) {
@@ -25,6 +28,7 @@ func New(cfg *config.Config) (*Watcher, error) {
 		fs:     fs,
 		Events: make(chan string, 100),
 		cfg:    cfg,
+		done:   make(chan struct{}),
 	}
 
 	for _, p := range cfg.WatchPaths {
@@ -67,6 +71,8 @@ func (w *Watcher) shouldIgnore(path, name string) bool {
 }
 
 func (w *Watcher) loop() {
+	defer close(w.done)
+	defer close(w.Events)
 	for {
 		select {
 		case event, ok := <-w.fs.Events:
@@ -122,6 +128,10 @@ func (w *Watcher) sendEvent(path string) {
 }
 
 func (w *Watcher) Close() error {
-	close(w.Events)
-	return w.fs.Close()
+	var err error
+	w.closeOnce.Do(func() {
+		err = w.fs.Close()
+		<-w.done
+	})
+	return err
 }
